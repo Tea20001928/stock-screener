@@ -257,6 +257,25 @@ class AutoPickPanel(BasePanel):
         self.tree.tag_configure("grey", background="#E8E8E8")
 
     def _run(self):
+        # 预先检查交易日，非交易日直接弹窗阻止
+        from datetime import datetime
+        from data_fetcher import get_recent_trading_days
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            recent = get_recent_trading_days(3)
+            if today_str != recent[0]:
+                messagebox.showwarning(
+                    "无法运行 - 非交易日",
+                    f"今天是 {today_str}，不是交易日！\n\n"
+                    f"最近交易日为 {recent[0]}。\n"
+                    f"自动选股功能只能在交易日 9:25 竞价结束后运行。\n\n"
+                    f"请切换到「连板复盘」选项卡进行复盘。"
+                )
+                return
+        except Exception as e:
+            messagebox.showerror("错误", f"交易日检测失败: {e}")
+            return
+
         self._start_thread(self._do_run)
 
     def _do_run(self):
