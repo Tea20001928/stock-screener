@@ -47,12 +47,6 @@ def _code_to_market(code: str) -> Tuple[str, str]:
         return "sz", "0"
 
 
-def _code_to_hist163_symbol(code: str) -> str:
-    """转换为 stock_zh_a_hist_163 所需的 symbol 格式（如 sh600000）"""
-    prefix, _ = _code_to_market(code)
-    return f"{prefix}{code}"
-
-
 def _code_to_eastmoney_secid(code: str) -> str:
     """转换为东方财富 secid 格式（如 1.600000 或 0.000001）"""
     _, market = _code_to_market(code)
@@ -103,7 +97,6 @@ def get_limit_up_stocks(date_str: str) -> pd.DataFrame:
     date_str: 'YYYY-MM-DD' 或 'YYYYMMDD'
     返回 DataFrame，包含代码、名称、最新价、流通市值、行业、封板时间、成交额等
     """
-    # 统一转为 YYYYMMDD 格式
     date_compact = date_str.replace("-", "")
 
     # 判断是否为最近交易日（用于选择API）
@@ -112,13 +105,10 @@ def get_limit_up_stocks(date_str: str) -> pd.DataFrame:
 
     try:
         if date_compact == latest_compact:
-            # 当日/最近交易日，使用标准接口
             df = _retry(ak.stock_zt_pool_em, date=date_compact)
         else:
-            # 尝试使用历史接口
             df = _retry(ak.stock_zt_pool_em, date=date_compact)
     except Exception:
-        # 如果带date参数失败，尝试用 previous 接口
         try:
             df = _retry(ak.stock_zt_pool_previous_em)
         except Exception as e:
@@ -127,33 +117,128 @@ def get_limit_up_stocks(date_str: str) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return pd.DataFrame(columns=ZT_KEEP_FIELDS)
 
-    # 保留需要的字段
     available_fields = [f for f in ZT_KEEP_FIELDS if f in df.columns]
     result = df[available_fields].copy()
 
-    # 标准化代码格式（6位字符串）
     if "代码" in result.columns:
         result["代码"] = result["代码"].astype(str).str.zfill(6)
 
     return result
 
 
-def get_daily_bar(symbol: str, date_str: str) -> dict:
+def get_daily_bar(symbol: str, date_str: str, prev_date_str: str = None) -> Optional[dict]:
     """
     获取个股日线数据（开盘价、昨收、成交额）
-    symbol: 6位代码如 '000001'
-    date_str: 'YYYY-MM-DD' 或 'YYYYMMDD'
-    返回: {"open": float, "prev_close": float, "amount": float} 或 None
-    """
-    date_compact = date_str.replace("-", "")
-    hist_symbol = _code_to_hist163_symbol(symbol)
+    优先使用腾讯数据源（可靠），东方财富作为备选
 
+    symbol: 6位代码如 '000001'
+    date_str: 目标日期 'YYYY-MM-DD'
+    prev_date_str: 前一个交易日 'YYYY-MM-DD'，用于获取昨收价
+
+    返回: {"open": float, "prev_close": float, "amount": float} 或 None
+        amount 单位为元（人民币）
+    """
+    if prev_date_str:
+        start_date = prev_date_str
+    else:
+        start_date = date_str
+
+    # 转为腾讯格式 symbol（如 sz000001, sh600000）
+    prefix, _ = _code_to_market(symbol)
+    tx_symbol = f"{prefix}{symbol}"
+
+    df = None
+    source = None
+
+    # 策略1：腾讯数据源（周末也可用，更可靠）
     try:
         df = _retry(
-            ak.stock_zh_a_hist_163,
-            symbol=hist_symbol,
-            start_date=date_compact,
-            end_date=date_compact,
+            ak.stock_zh_a_hist_tx,
+            symbol=tx_symbol,
+            start_date=start_date,
+            end_date=date_str,
+        )
+        source = "tx"
+    except Exception:
+        pass
+
+    # 策略2：东方财富数据源
+    if df is None:
+        date_compact = date_str.replace("-", "")
+        start_compact = start_date.replace("-", "")
+        try:
+            df = _retry(
+                ak.stock_zh_a_hist,
+                symbol=symbol,
+                period="daily",
+                start_date=start_compact,
+                end_date=date_compact,
+                adjust="",
+            )
+            source = "em"
+        except Exception:
+            return None
+
+    if df is None or len(df) == 0:
+        return None
+
+    # 根据数据源处理列名
+    if source == "tx":
+        # 腾讯源：列名为英文 date, open, close, high, low, amount
+        # date 列是 datetime.date 对象，需要转为字符串
+        # amount 单位是"万"（万元），需转为元
+        df["_date_str"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        date_col = "_date_str"
+        open_col, close_col, amount_col = "open", "close", "amount"
+    else:
+        # 东方财富源：列名为中文 日期, 开盘, 收盘, 成交额
+        df["_date_str"] = pd.to_datetime(df["日期"]).dt.strftime("%Y-%m-%d")
+        date_col = "_date_str"
+        open_col, close_col, amount_col = "开盘", "收盘", "成交额"
+
+    # 找目标日期的行
+    target_rows = df[df[date_col] == date_str]
+    if len(target_rows) == 0:
+        return None
+
+    row = target_rows.iloc[0]
+    open_price = float(row.get(open_col, 0) or 0)
+    amount_raw = float(row.get(amount_col, 0) or 0)
+
+    # 腾讯数据源的 amount 单位是"万元"，转为"元"
+    if source == "tx":
+        amount = amount_raw * 10000
+    else:
+        amount = amount_raw
+
+    # 昨收价 = 前一个交易日的收盘价
+    prev_close = 0.0
+    prev_rows = df[df[date_col] < date_str]
+    if len(prev_rows) > 0:
+        prev_close = float(prev_rows.iloc[-1].get(close_col, 0) or 0)
+
+    return {
+        "open": open_price,
+        "prev_close": prev_close,
+        "amount": amount,
+    }
+
+
+def get_auction_data_via_min_kline(symbol: str, date_str: str) -> Optional[dict]:
+    """
+    通过 akshare 的分钟K线接口获取集合竞价数据（9:15-9:25时段）
+    symbol: 6位代码如 '000001'
+    date_str: 'YYYY-MM-DD'
+    返回: {"auction_amount": float} 或 None
+    """
+    try:
+        df = _retry(
+            ak.stock_zh_a_hist_min_em,
+            symbol=symbol,
+            period="1",
+            start_date=f"{date_str} 09:15:00",
+            end_date=f"{date_str} 15:00:00",
+            adjust="",
         )
     except Exception:
         return None
@@ -161,28 +246,112 @@ def get_daily_bar(symbol: str, date_str: str) -> dict:
     if df is None or len(df) == 0:
         return None
 
-    row = df.iloc[0]
-    return {
-        "open": float(row.get("开盘价", row.get("开盘", 0)) or 0),
-        "prev_close": float(row.get("前收盘", row.get("前收", 0)) or 0),
-        "amount": float(row.get("成交金额", row.get("成交额", 0)) or 0),
-    }
+    # 检查时间列
+    time_col = "时间" if "时间" in df.columns else df.columns[0]
+    df[time_col] = df[time_col].astype(str)
+
+    # 过滤 09:15 - 09:25
+    auction_rows = df[
+        df[time_col].str.contains(r"09:1[5-9]|09:2[0-5]", na=False)
+    ]
+
+    if len(auction_rows) == 0:
+        return None
+
+    # 找成交额列
+    amount_col = None
+    for col in ["成交额", "成交金额"]:
+        if col in auction_rows.columns:
+            amount_col = col
+            break
+
+    if amount_col is None:
+        return None
+
+    total_amount = float(auction_rows[amount_col].sum())
+    if total_amount > 0:
+        return {"auction_amount": total_amount}
+
+    return None
 
 
-def get_auction_data_eastmoney(symbol: str, date_str: str) -> Optional[dict]:
+def get_auction_data_pre_min(symbol: str) -> Optional[dict]:
     """
-    通过东方财富分钟K线接口获取集合竞价数据（9:15-9:25时段）
+    通过 akshare 盘前分钟接口获取集合竞价数据（仅限最近交易日）
     symbol: 6位代码如 '000001'
-    date_str: 'YYYY-MM-DD'
-    返回: {"auction_amount": float, "auction_volume": float} 或 None
-
-    注：东方财富1分钟K线从9:30开始，不包含9:15-9:25的集合竞价时段。
-    此函数尝试通过 trends2 接口获取，若不可用则返回 None。
     """
+    try:
+        df = _retry(ak.stock_zh_a_hist_pre_min_em, symbol=symbol)
+    except Exception:
+        return None
+
+    if df is None or len(df) == 0:
+        return None
+
+    time_col = None
+    for col in df.columns:
+        if "时间" in col or "time" in col.lower():
+            time_col = col
+            break
+
+    if time_col is None:
+        return None
+
+    df[time_col] = df[time_col].astype(str)
+    auction_rows = df[
+        df[time_col].str.contains(r"09:1[5-9]|09:2[0-5]", na=False)
+    ]
+
+    if len(auction_rows) == 0:
+        return None
+
+    amount_col = None
+    for col in ["成交额", "成交金额"]:
+        if col in auction_rows.columns:
+            amount_col = col
+            break
+
+    if amount_col is None:
+        return None
+
+    total_amount = float(auction_rows[amount_col].sum())
+    if total_amount > 0:
+        return {"auction_amount": total_amount}
+
+    return None
+
+
+def get_auction_data(symbol: str, date_str: str, is_latest: bool = False) -> Optional[dict]:
+    """
+    获取集合竞价数据（统一入口，多策略尝试）
+    symbol: 6位代码
+    date_str: 'YYYY-MM-DD'
+    is_latest: 是否为最近交易日
+    """
+    # 策略1：盘前分钟接口（仅限最近交易日）
+    if is_latest:
+        result = get_auction_data_pre_min(symbol)
+        if result is not None:
+            return result
+
+    # 策略2：1分钟K线接口
+    result = get_auction_data_via_min_kline(symbol, date_str)
+    if result is not None:
+        return result
+
+    # 策略3：东方财富 HTTP 接口
+    result = _get_auction_data_eastmoney_http(symbol, date_str)
+    if result is not None:
+        return result
+
+    return None
+
+
+def _get_auction_data_eastmoney_http(symbol: str, date_str: str) -> Optional[dict]:
+    """东方财富 HTTP 接口获取集合竞价数据"""
     date_compact = date_str.replace("-", "")
     secid = _code_to_eastmoney_secid(symbol)
 
-    # 尝试用分钟K线获取（通常从9:30开始，不含集合竞价）
     url = (
         f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
         f"?secid={secid}&klt=1&fqt=0"
@@ -198,16 +367,16 @@ def get_auction_data_eastmoney(symbol: str, date_str: str) -> Optional[dict]:
 
         if data.get("data") and data["data"].get("klines"):
             klines = data["data"]["klines"]
-            # 检查是否有9:15-9:25的数据
             auction_amount = 0.0
             for line in klines:
                 parts = line.split(",")
-                time_str = parts[0].split(" ")[-1] if " " in parts[0] else parts[0]
-                # 集合竞价时段: 09:15-09:25
-                if "09:15" <= time_str <= "09:25":
-                    # parts[6] 通常是成交额
+                time_part = parts[0].split(" ")[-1] if " " in parts[0] else parts[0]
+                if "09:15" <= time_part <= "09:25":
                     if len(parts) >= 7:
-                        auction_amount += float(parts[6]) if parts[6] != "-" else 0.0
+                        try:
+                            auction_amount += float(parts[6]) if parts[6] != "-" else 0.0
+                        except ValueError:
+                            pass
 
             if auction_amount > 0:
                 return {"auction_amount": auction_amount}
@@ -217,82 +386,24 @@ def get_auction_data_eastmoney(symbol: str, date_str: str) -> Optional[dict]:
     return None
 
 
-def get_auction_data_current(symbol: str) -> Optional[dict]:
-    """
-    获取当日/最近的集合竞价数据（使用 akshare 盘前分钟接口）
-    symbol: 6位代码如 '000001'
-    返回: {"auction_amount": float} 或 None
-    """
-    try:
-        df = _retry(ak.stock_zh_a_hist_pre_min_em, symbol=symbol)
-    except Exception:
-        return None
-
-    if df is None or len(df) == 0:
-        return None
-
-    # 过滤集合竞价时段 9:15 - 9:25
-    if "时间" not in df.columns:
-        return None
-
-    auction_rows = df[
-        df["时间"].astype(str).str.contains(r"09:1[5-9]|09:2[0-5]", na=False)
-    ]
-
-    if len(auction_rows) == 0:
-        return None
-
-    # 成交额列（元）
-    amount_col = None
-    for col in ["成交额", "成交金额"]:
-        if col in auction_rows.columns:
-            amount_col = col
-            break
-
-    if amount_col is None:
-        return None
-
-    total_amount = auction_rows[amount_col].sum()
-    return {"auction_amount": float(total_amount)}
-
-
-def get_auction_data(symbol: str, date_str: str, is_latest: bool = False) -> Optional[dict]:
-    """
-    获取集合竞价数据（统一入口）
-    symbol: 6位代码
-    date_str: 'YYYY-MM-DD'
-    is_latest: 是否为最近交易日
-    """
-    # 优先使用盘前分钟接口（仅限当日）
-    if is_latest:
-        result = get_auction_data_current(symbol)
-        if result is not None:
-            return result
-
-    # 尝试东方财富历史接口
-    result = get_auction_data_eastmoney(symbol, date_str)
-    if result is not None:
-        return result
-
-    # 都不可用：返回 None，后续标记为 "N/A"
-    return None
-
-
 def enrich_single_stock(
     code: str,
     name: str,
     current_date: str,
     prev_date: str,
+    prev_prev_date: str,
     is_latest: bool,
     zt_row: dict,
     prev_zt_row: Optional[dict] = None,
 ) -> dict:
     """
     为单只股票补齐所有字段
+
     code: 股票代码
     name: 股票名称
     current_date: 二板日期 (YYYY-MM-DD)
     prev_date: 一板日期 (YYYY-MM-DD)
+    prev_prev_date: 一板的前一交易日 (YYYY-MM-DD)，用于计算一板昨收
     is_latest: 是否为最近交易日
     zt_row: 二板涨停数据行
     prev_zt_row: 一板涨停数据行
@@ -306,7 +417,7 @@ def enrich_single_stock(
         "当天最后涨停时间": _format_limit_up_time(zt_row.get("最后封板时间")),
     }
 
-    # 默认值
+    # 设置默认值
     result.update({
         "二板竞价涨幅": "N/A",
         "二板竞价成交量": "N/A",
@@ -320,10 +431,10 @@ def enrich_single_stock(
         "二板/一板竞价涨幅": "N/A",
     })
 
-    # ---- 二板（当前交易日）日线数据 ----
-    bar2 = get_daily_bar(code, current_date)
-    if bar2 and bar2["prev_close"] > 0:
-        # 二板竞价涨幅 = (开盘价 - 前收盘) / 前收盘 × 100%
+    # ---- 二板日线数据 ----
+    # 二板的昨收 = 一板的收盘价，所以取 prev_date 作为 start_date
+    bar2 = get_daily_bar(code, current_date, prev_date_str=prev_date)
+    if bar2 and bar2.get("prev_close", 0) > 0 and bar2.get("open", 0) > 0:
         jia2_change = (bar2["open"] - bar2["prev_close"]) / bar2["prev_close"] * 100
         result["二板竞价涨幅"] = round(jia2_change, 2)
 
@@ -332,13 +443,14 @@ def enrich_single_stock(
     if auction2 and auction2.get("auction_amount", 0) > 0:
         result["二板竞价成交量"] = auction2["auction_amount"]
 
-    # ---- 一板（前一交易日）日线数据 ----
-    bar1 = get_daily_bar(code, prev_date)
-    if bar1 and bar1["prev_close"] > 0:
+    # ---- 一板日线数据 ----
+    # 一板的昨收 = 一板前一日的收盘价
+    bar1 = get_daily_bar(code, prev_date, prev_date_str=prev_prev_date)
+    if bar1 and bar1.get("prev_close", 0) > 0 and bar1.get("open", 0) > 0:
         jia1_change = (bar1["open"] - bar1["prev_close"]) / bar1["prev_close"] * 100
         result["一板竞价涨幅"] = round(jia1_change, 2)
 
-    # 一板竞价成交量（历史日期）
+    # 一板竞价成交量
     auction1 = get_auction_data(code, prev_date, is_latest=False)
     if auction1 and auction1.get("auction_amount", 0) > 0:
         result["一板竞价成交量"] = auction1["auction_amount"]
@@ -405,6 +517,14 @@ def fetch_all_data(
     if progress_callback:
         progress_callback("获取交易日历...", 0.05)
 
+    # 获取一板的前一交易日（用于计算一板昨收价）
+    recent_days = get_recent_trading_days(10)
+    try:
+        prev_idx = recent_days.index(prev_date)
+        prev_prev_date = recent_days[prev_idx + 1] if prev_idx + 1 < len(recent_days) else prev_date
+    except (ValueError, IndexError):
+        prev_prev_date = prev_date
+
     # 1. 获取两日涨停股列表
     if progress_callback:
         progress_callback(f"获取 {current_date} 涨停股列表...", 0.1)
@@ -436,12 +556,11 @@ def fetch_all_data(
     total = len(consecutive_list)
     enriched = []
 
-    # 构建前日数据索引
+    # 构建索引
     prev_zt_index = {}
     for _, row in prev_zt.iterrows():
         prev_zt_index[str(row["代码"]).zfill(6)] = row
 
-    # 构建当日数据索引
     current_zt_index = {}
     for _, row in current_zt.iterrows():
         current_zt_index[str(row["代码"]).zfill(6)] = row
@@ -463,6 +582,7 @@ def fetch_all_data(
                 name=name,
                 current_date=current_date,
                 prev_date=prev_date,
+                prev_prev_date=prev_prev_date,
                 is_latest=is_latest,
                 zt_row=zt_row if zt_row is not None else {},
                 prev_zt_row=prev_zt_row if prev_zt_row is not None else None,
@@ -473,7 +593,6 @@ def fetch_all_data(
                 progress_callback(f"警告: {code} {name} 数据获取失败 ({e})", None)
             continue
 
-        # 请求间隔，避免被限流
         time.sleep(0.2)
 
     return enriched, current_zt, prev_zt
