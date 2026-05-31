@@ -7,7 +7,10 @@ import sys
 import os
 
 # 确保项目根目录在 path 中
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, 'frozen', False):
+    sys.path.insert(0, sys._MEIPASS)
+else:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from screener import screen_consecutive_limit_up
 from excel_writer import write_excel

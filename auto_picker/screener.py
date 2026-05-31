@@ -12,7 +12,10 @@ from datetime import datetime
 from typing import List, Optional, Callable, Tuple
 from collections import OrderedDict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if getattr(sys, 'frozen', False):
+    sys.path.insert(0, sys._MEIPASS)
+else:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_fetcher import (
     get_recent_trading_days,
     get_limit_up_stocks,

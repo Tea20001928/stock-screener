@@ -9,7 +9,11 @@ import os
 import threading
 import subprocess
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# PyInstaller 兼容：exe打包后路径不同
+if getattr(sys, 'frozen', False):
+    sys.path.insert(0, sys._MEIPASS)
+else:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog

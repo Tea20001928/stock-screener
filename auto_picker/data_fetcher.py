@@ -11,7 +11,10 @@ import akshare as ak
 from typing import Optional, Tuple, List
 
 # 导入父模块的共享工具
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if getattr(sys, 'frozen', False):
+    sys.path.insert(0, sys._MEIPASS)
+else:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_fetcher import (
     _retry,
     _code_to_market,
