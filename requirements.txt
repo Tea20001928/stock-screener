@@ -1,1 +1,4 @@
-# 股票筛选程序依赖
+akshare>=1.16.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+requests>=2.28.0
