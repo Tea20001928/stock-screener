@@ -283,6 +283,25 @@ class AutoPickPanel(BasePanel):
         today_str = datetime.now().strftime("%Y-%m-%d")
         try:
             recent = get_recent_trading_days(3)
+        except Exception as e:
+            import traceback
+            detail = traceback.format_exc()
+            # 写桌面日志
+            log_path = os.path.join(os.path.expanduser("~"), "Desktop", "程序错误日志.txt")
+            try:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(f"交易日检测异常 - {datetime.now()}\n{detail}")
+            except Exception:
+                pass
+            messagebox.showerror(
+                "交易日检测失败",
+                f"无法获取交易日历，请检查网络连接。\n\n"
+                f"错误: {str(e)[:300]}\n\n"
+                f"完整日志已写入桌面: 程序错误日志.txt"
+            )
+            return
+
+        try:
             if today_str != recent[0]:
                 messagebox.showwarning(
                     "无法运行 - 非交易日",
@@ -293,8 +312,7 @@ class AutoPickPanel(BasePanel):
                 )
                 return
         except Exception as e:
-            messagebox.showerror("错误", f"交易日检测失败: {e}")
-            return
+            messagebox.showerror("错误", f"交易日判定失败: {e}")
 
         self._start_thread(self._do_run)
 
