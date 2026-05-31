@@ -22,9 +22,15 @@ from screener import screen_consecutive_limit_up, determine_target_dates
 from excel_writer import write_excel, OUTPUT_DIR
 from config import COLUMNS as COLUMNS_REVIEW
 
-from auto_picker.screener import screen_auto_pick
-from auto_picker.excel_writer import write_excel as write_excel_auto
-from auto_picker.config import COLUMNS as COLUMNS_AUTO
+# 自动选股模块（可能因 exe 打包问题导入失败，延迟加载）
+_auto_pick_available = True
+try:
+    from auto_picker.screener import screen_auto_pick
+    from auto_picker.excel_writer import write_excel as write_excel_auto
+    from auto_picker.config import COLUMNS as COLUMNS_AUTO
+except ImportError as e:
+    _auto_pick_available = False
+    _auto_import_error = str(e)
 
 
 class BasePanel(ttk.Frame):
@@ -261,6 +267,16 @@ class AutoPickPanel(BasePanel):
         self.tree.tag_configure("grey", background="#E8E8E8")
 
     def _run(self):
+        # 检查模块是否可用
+        if not _auto_pick_available:
+            messagebox.showerror(
+                "模块加载失败",
+                f"自动选股模块未能加载，可能是打包问题。\n\n"
+                f"错误详情: {_auto_import_error}\n\n"
+                f"请尝试用源码运行: python gui.py"
+            )
+            return
+
         # 预先检查交易日，非交易日直接弹窗阻止
         from datetime import datetime
         from data_fetcher import get_recent_trading_days
@@ -404,4 +420,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # 写入错误日志到桌面
+        import traceback
+        log_path = os.path.join(os.path.expanduser("~"), "Desktop", "程序错误日志.txt")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"错误时间: {__import__('datetime').datetime.now()}\n")
+            f.write(f"错误类型: {type(e).__name__}\n")
+            f.write(f"错误信息: {e}\n\n")
+            f.write(traceback.format_exc())
+        # 也尝试弹窗
+        try:
+            messagebox.showerror("程序启动失败", f"错误已写入桌面: 程序错误日志.txt\n\n{str(e)[:200]}")
+        except Exception:
+            pass
+        raise
