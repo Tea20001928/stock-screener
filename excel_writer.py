@@ -55,10 +55,16 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
     """
     _ensure_output_dir()
 
-    # 生成文件名
+    # 生成文件名（如果文件被占用则自动加时间戳）
     date_label = current_date.replace("-", "")
     filename = f"连板股复盘_{date_label}.xlsx"
     filepath = os.path.join(OUTPUT_DIR, filename)
+
+    # 如果文件存在且被占用，生成带时间戳的新文件名
+    if os.path.exists(filepath):
+        timestamp = datetime.now().strftime("%H%M%S")
+        filename = f"连板股复盘_{date_label}_{timestamp}.xlsx"
+        filepath = os.path.join(OUTPUT_DIR, filename)
 
     # 创建 DataFrame
     df = pd.DataFrame(stock_list)

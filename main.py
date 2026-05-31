@@ -43,20 +43,20 @@ def main():
 
         print()
         print("=" * 60)
-        print(f"  ✅ 筛选完成！共找到 {len(stock_list)} 只连板股")
-        print(f"  📅 二板（当前）: {current_date}")
-        print(f"  📅 一板（前日）: {prev_date}")
-        print(f"  📁 报表文件: {filepath}")
+        print(f"  [OK] 筛选完成！共找到 {len(stock_list)} 只连板股")
+        print(f"  二板（当前）: {current_date}")
+        print(f"  一板（前日）: {prev_date}")
+        print(f"  报表文件: {filepath}")
         print("=" * 60)
 
     except ValueError as e:
         print()
-        print(f"  ⚠️  {e}")
+        print(f"  [WARN] {e}")
         print("  请确认：1) 数据源可访问  2) 日期正确  3) 盘后数据已更新")
         sys.exit(1)
     except Exception as e:
         print()
-        print(f"  ❌ 运行出错: {e}")
+        print(f"  [ERROR] 运行出错: {e}")
         sys.exit(1)
 
 
