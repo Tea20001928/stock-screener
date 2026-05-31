@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import pandas as pd
+from datetime import datetime
 from typing import List, Optional, Callable, Tuple
 from collections import OrderedDict
 
@@ -106,13 +107,22 @@ def screen_auto_pick(
 
     返回: (股票数据列表, 三板日期, 二板日期, 一板日期)
     """
-    # 1. 确定三个日期
-    if progress_callback:
-        progress_callback("获取交易日历...", 0.05)
-
+    # 0. 交易日校验 — 非交易日禁止运行
+    today_str = datetime.now().strftime("%Y-%m-%d")
     recent_days = get_recent_trading_days(10)
     if len(recent_days) < 4:
         raise ValueError("交易日历数据不足")
+
+    if today_str != recent_days[0]:
+        raise ValueError(
+            f"今天是 {today_str}，不是交易日！\n"
+            f"最近交易日为 {recent_days[0]}。\n"
+            f"自动选股功能只能在交易日 9:25 竞价结束后运行。"
+        )
+
+    # 1. 确定三个日期
+    if progress_callback:
+        progress_callback("获取交易日历...", 0.05)
 
     sanban_date = recent_days[0]   # 三板=今天
     erban_date = recent_days[1]    # 二板=昨交易日
