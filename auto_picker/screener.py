@@ -9,7 +9,7 @@ import os
 import time
 import pandas as pd
 from datetime import datetime
-from typing import List, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable, Tuple
 from collections import OrderedDict
 
 if getattr(sys, 'frozen', False):
@@ -22,6 +22,7 @@ from data_fetcher import (
 )
 from auto_picker.data_fetcher import (
     get_today_spot_data,
+    get_spot_for_codes_sina,
     get_today_auction_volume,
     get_auction_price_change,
     get_stock_free_float_cap,
@@ -138,42 +139,24 @@ def screen_auto_pick(
             f"三板={sanban_date}, 二板={erban_date}, 一板={yiban_date}", 0.08
         )
 
-    # 2. 获取当日全A股快照（三板数据）
+    # 2. 先获取二板+一板涨停股，确定候选范围（避免全市场扫 5000+ 只股票）
     if progress_callback:
-        progress_callback("获取当日实时行情...", 0.1)
-
-    spot_df = get_today_spot_data()
-    if spot_df is None or spot_df.empty:
-        raise ValueError("无法获取当日实时行情（请在交易日 9:25 之后运行）")
-
-    # 构建快照索引
-    spot_index = {}
-    for _, row in spot_df.iterrows():
-        code = str(row["代码"]).zfill(6)
-        spot_index[code] = {
-            "name": row.get("名称", code),
-            "open": float(row.get("今开", 0) or 0),
-            "prev_close": float(row.get("昨收", 0) or 0),
-        }
-
-    # 3. 获取二板+一板涨停股交集
-    if progress_callback:
-        progress_callback(f"获取 {erban_date} 涨停股列表...", 0.15)
+        progress_callback(f"获取 {erban_date} 涨停股列表...", 0.12)
 
     erban_zt = get_limit_up_stocks(erban_date)
     if erban_zt.empty:
         raise ValueError(f"{erban_date} 无涨停数据")
 
     if progress_callback:
-        progress_callback(f"获取 {yiban_date} 涨停股列表...", 0.25)
+        progress_callback(f"获取 {yiban_date} 涨停股列表...", 0.2)
 
     yiban_zt = get_limit_up_stocks(yiban_date)
     if yiban_zt.empty:
         raise ValueError(f"{yiban_date} 无涨停数据")
 
-    # 交集
+    # 交集 → 连板候选股
     if progress_callback:
-        progress_callback("筛选一板+二板连板股...", 0.3)
+        progress_callback("筛选一板+二板连板股...", 0.25)
 
     erban_codes = set(erban_zt["代码"].tolist())
     yiban_codes = set(yiban_zt["代码"].tolist())
@@ -193,6 +176,12 @@ def screen_auto_pick(
     for _, row in yiban_zt.iterrows():
         yiban_index[str(row["代码"]).zfill(6)] = row
 
+    # 3. 获取实时行情 — 只拉候选股，先试东方财富，失败回退新浪
+    if progress_callback:
+        progress_callback(f"获取 {len(candidates_sorted)} 只候选股实时行情...", 0.28)
+
+    spot_data = _fetch_candidate_spot_data(candidates_sorted)
+
     # 4. 逐只股票分析
     total = len(candidates_sorted)
     results = []
@@ -206,7 +195,7 @@ def screen_auto_pick(
 
         er_row = erban_index.get(code)
         yb_row = yiban_index.get(code)
-        spot = spot_index.get(code)
+        spot = spot_data.get(code)  # None 表示未获取到行情（可能停牌）
 
         name = er_row["名称"] if er_row is not None else (
             spot["name"] if spot else code
@@ -226,8 +215,7 @@ def screen_auto_pick(
 
         # ---- 二板竞价数据 ----
         erban_jia_change = get_auction_price_change(code, erban_date, yiban_date)
-        erban_auction_amount = get_stock_free_float_cap(code, erban_date)
-        # 二板竞价金额需要单独抓取（使用 pre_min + 分钟数据）
+        # 二板竞价金额（使用 pre_min + 分钟数据）
         erban_auction_vol = _get_auction_amount_for_date(code, erban_date)
 
         # ---- 基础字段 ----
@@ -320,18 +308,56 @@ def screen_auto_pick(
     return results, sanban_date, erban_date, yiban_date
 
 
+def _fetch_candidate_spot_data(codes: List[str]) -> Dict[str, dict]:
+    """
+    获取候选股实时行情，优先东方财富，失败回退新浪
+
+    codes: 6位代码列表
+    返回: {code: {"name": str, "open": float, "prev_close": float}}
+    """
+    if not codes:
+        return {}
+
+    # 策略1：尝试东方财富全量快照（快速，一次请求覆盖全部候选股）
+    try:
+        df = get_today_spot_data()
+        if df is not None and not df.empty:
+            spot_data = {}
+            for _, row in df.iterrows():
+                c = str(row.get("代码", "")).zfill(6)
+                if c in codes:
+                    spot_data[c] = {
+                        "name": row.get("名称", c),
+                        "open": float(row.get("今开", 0) or 0),
+                        "prev_close": float(row.get("昨收", 0) or 0),
+                    }
+            if spot_data:
+                return spot_data
+    except Exception:
+        pass
+
+    # 策略2：新浪财经批量接口（只拉候选股，轻量）
+    return get_spot_for_codes_sina(codes)
+
+
 def _get_auction_amount_for_date(symbol: str, date_str: str) -> Optional[float]:
     """
     获取指定日期的竞价成交额（9:15-9:25 集合竞价时段）
-    当日用 pre_min_em，历史用 minute K线接口
+    多策略：CDN trends2 → pre_min_em → minute K线 → Sina 首分钟
     """
     import akshare as ak
-    from data_fetcher import get_latest_trading_day
+    from data_fetcher import get_latest_trading_day, _get_auction_data_via_cdn, _get_auction_data_via_sina
+    from auto_picker.data_fetcher import _parse_auction_from_df
 
     latest_day = get_latest_trading_day()
     is_today = (date_str == latest_day)
 
-    # 策略1：当日 → 盘前分钟接口
+    # 策略1：CDN trends2 接口（最可靠，含真正的 9:15-9:25 竞价时段数据）
+    result = _get_auction_data_via_cdn(symbol)
+    if result is not None:
+        return result.get("auction_amount")
+
+    # 策略2：当日 → 盘前分钟接口
     if is_today:
         try:
             df = ak.stock_zh_a_hist_pre_min_em(symbol=symbol)
@@ -343,7 +369,7 @@ def _get_auction_amount_for_date(symbol: str, date_str: str) -> Optional[float]:
             if result is not None:
                 return result
 
-    # 策略2：历史日期 → 1分钟K线接口
+    # 策略3：历史日期 → 1分钟K线接口
     try:
         df = ak.stock_zh_a_hist_min_em(
             symbol=symbol,
@@ -353,41 +379,16 @@ def _get_auction_amount_for_date(symbol: str, date_str: str) -> Optional[float]:
             adjust="",
         )
     except Exception:
-        return None
+        df = None
 
     if df is not None and len(df) > 0:
-        return _parse_auction_from_df(df)
+        result = _parse_auction_from_df(df)
+        if result is not None:
+            return result
+
+    # 策略4：新浪分钟数据首分钟成交额（兜底，适用于历史日期）
+    result = _get_auction_data_via_sina(symbol, date_str)
+    if result is not None:
+        return result.get("auction_amount")
 
     return None
-
-
-def _parse_auction_from_df(df: pd.DataFrame) -> Optional[float]:
-    """从分钟数据 DataFrame 中提取竞价时段成交额"""
-    time_col = None
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if "时间" in col_lower or "time" in col_lower:
-            time_col = col
-            break
-
-    if time_col is None:
-        return None
-
-    time_series = df[time_col].astype(str)
-    auction_mask = time_series.str.contains(r"09:1[5-9]|09:2[0-5]", na=False)
-    auction_rows = df[auction_mask]
-
-    if len(auction_rows) == 0:
-        return None
-
-    amount_col = None
-    for col in ["成交额", "成交金额"]:
-        if col in auction_rows.columns:
-            amount_col = col
-            break
-
-    if amount_col is None:
-        return None
-
-    total = float(auction_rows[amount_col].sum())
-    return total if total > 0 else None

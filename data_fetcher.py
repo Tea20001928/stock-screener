@@ -328,21 +328,136 @@ def get_auction_data(symbol: str, date_str: str, is_latest: bool = False) -> Opt
     date_str: 'YYYY-MM-DD'
     is_latest: 是否为最近交易日
     """
-    # 策略1：盘前分钟接口（仅限最近交易日）
+    # 策略1：CDN 节点 trends2 接口（最可靠，绕过 push2 主站阻断）
+    result = _get_auction_data_via_cdn(symbol)
+    if result is not None:
+        return result
+
+    # 策略2：盘前分钟接口（仅限最近交易日）
     if is_latest:
         result = get_auction_data_pre_min(symbol)
         if result is not None:
             return result
 
-    # 策略2：1分钟K线接口
+    # 策略3：1分钟K线接口
     result = get_auction_data_via_min_kline(symbol, date_str)
     if result is not None:
         return result
 
-    # 策略3：东方财富 HTTP 接口
+    # 策略4：东方财富 HTTP 接口（默认 push2his）
     result = _get_auction_data_eastmoney_http(symbol, date_str)
     if result is not None:
         return result
+
+    # 策略5：新浪分钟数据首分钟成交额（兼容所有日期）
+    result = _get_auction_data_via_sina(symbol, date_str)
+    if result is not None:
+        return result
+
+    return None
+
+
+def _get_auction_data_via_cdn(symbol: str) -> Optional[dict]:
+    """
+    通过 57.push2.eastmoney.com CDN 节点获取集合竞价数据
+    该节点可绕过 push2 主站的连接限制，返回当日 trends2 分时数据（含 9:15-9:25 竞价时段）
+
+    symbol: 6位代码如 '000001'
+    返回: {"auction_amount": float} 或 None
+    """
+    market_code = "1" if str(symbol).zfill(6).startswith("6") else "0"
+    secid = f"{market_code}.{symbol}"
+
+    # 使用多个 CDN 节点轮询
+    cdn_nodes = [
+        "https://57.push2.eastmoney.com",
+        "https://76.push2.eastmoney.com",
+        "https://push2.eastmoney.com",
+    ]
+
+    for node in cdn_nodes:
+        url = f"{node}/api/qt/stock/trends2/get"
+        params = {
+            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "ndays": "1",
+            "iscr": "1",
+            "iscca": "0",
+            "secid": secid,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            })
+            if resp.status_code != 200:
+                continue
+
+            data = resp.json()
+            trends = data.get("data", {}).get("trends", [])
+            if not trends:
+                continue
+
+            # 过滤竞价时段 9:15-9:25，累加成-交额
+            auction_amount = 0.0
+            for line in trends:
+                parts = line.split(",")
+                if len(parts) < 7:
+                    continue
+                time_str = parts[0].split(" ")[-1] if " " in parts[0] else parts[0]
+                if "09:15" <= time_str <= "09:25":
+                    try:
+                        auction_amount += float(parts[6]) if parts[6] else 0.0
+                    except ValueError:
+                        pass
+
+            if auction_amount > 0:
+                return {"auction_amount": auction_amount}
+
+        except Exception:
+            continue
+
+    return None
+
+
+def _get_auction_data_via_sina(symbol: str, date_str: str) -> Optional[dict]:
+    """
+    通过新浪财经 1 分钟 K 线获取首分钟成交额作为竞价金额的近似值
+
+    新浪分钟数据从 09:31 开始（不含 9:15-9:25 竞价时段），
+    但第一分钟柱（09:31）包含了竞价撮合结果的成交回报，可作为竞价活跃度的替代指标。
+
+    symbol: 6位代码如 '000001'
+    date_str: 'YYYY-MM-DD'
+    """
+    prefix, _ = _code_to_market(symbol)
+    sina_symbol = f"{prefix}{symbol}"
+
+    try:
+        df = _retry(
+            ak.stock_zh_a_minute,
+            symbol=sina_symbol,
+            period="1",
+        )
+    except Exception:
+        return None
+
+    if df is None or len(df) == 0:
+        return None
+
+    # 过滤目标日期的数据
+    df["_date_str"] = pd.to_datetime(df["day"]).dt.strftime("%Y-%m-%d")
+    day_rows = df[df["_date_str"] == date_str]
+
+    if len(day_rows) == 0:
+        return None
+
+    # 取第一分钟（09:31）作为竞价活跃度近似值
+    first_row = day_rows.iloc[0]
+    amount = float(first_row.get("amount", 0) or 0)
+
+    if amount > 0:
+        return {"auction_amount": amount}
 
     return None
 
