@@ -211,6 +211,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
         "股票代码": 12,
         "股票名称": 12,
         "股票价格": 10,
+        "行业涨停数": 10,
         "自由流通盘金额": 16,
         "流通市值": 16,
         "行业": 12,

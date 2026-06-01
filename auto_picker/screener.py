@@ -19,6 +19,7 @@ else:
 from data_fetcher import (
     get_recent_trading_days,
     get_limit_up_stocks,
+    get_industry_limit_up_count,
 )
 from auto_picker.data_fetcher import (
     get_today_spot_data,
@@ -153,6 +154,9 @@ def screen_auto_pick(
     if yiban_zt.empty:
         raise ValueError(f"{yiban_date} 无涨停数据")
 
+    # 统计二板日各行业的涨停股数量（选股模式用前一天行业涨停数）
+    industry_counts = get_industry_limit_up_count(erban_zt)
+
     # 交集 → 连板候选股
     if progress_callback:
         progress_callback("筛选一板+二板连板股...", 0.25)
@@ -225,6 +229,7 @@ def screen_auto_pick(
         free_float_cap = get_free_float_cap(code, fallback=fallback_float) if fallback_float > 0 else 0
         last_zt_time = er_row.get("最后封板时间", "N/A") if er_row is not None else "N/A"
         industry = er_row.get("所属行业", "N/A") if er_row is not None else "N/A"
+        industry_zt_count = industry_counts.get(industry, 0) if industry != "N/A" else 0
 
         # 格式化涨停时间
         from data_fetcher import _format_limit_up_time
@@ -274,6 +279,7 @@ def screen_auto_pick(
         results.append({
             "股票代码": code,
             "股票名称": name,
+            "行业涨停数": industry_zt_count,
             "三板竞价涨幅": sanban_jia_change if sanban_jia_change is not None else "N/A",
             "三板竞价金额": sanban_auction_amount if sanban_auction_amount is not None else "N/A",
             "二板竞价涨幅": erban_jia_change if erban_jia_change is not None else "N/A",

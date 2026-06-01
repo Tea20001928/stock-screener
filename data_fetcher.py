@@ -126,6 +126,19 @@ def get_limit_up_stocks(date_str: str) -> pd.DataFrame:
     return result
 
 
+def get_industry_limit_up_count(zt_df: pd.DataFrame) -> Dict[str, int]:
+    """
+    统计涨停股池里每个行业的涨停股票数量
+
+    zt_df: get_limit_up_stocks 返回的 DataFrame，需含 "所属行业" 列
+    返回: {"行业名": 涨停数, ...}
+    """
+    if zt_df is None or zt_df.empty or "所属行业" not in zt_df.columns:
+        return {}
+
+    return zt_df.groupby("所属行业").size().to_dict()
+
+
 def get_daily_bar(symbol: str, date_str: str, prev_date_str: str = None) -> Optional[dict]:
     """
     获取个股日线数据（开盘价、昨收、成交额）
@@ -510,6 +523,7 @@ def enrich_single_stock(
     is_latest: bool,
     zt_row: dict,
     prev_zt_row: Optional[dict] = None,
+    industry_zt_count: int = 0,
 ) -> dict:
     """
     为单只股票补齐所有字段
@@ -522,11 +536,13 @@ def enrich_single_stock(
     is_latest: 是否为最近交易日
     zt_row: 二板涨停数据行
     prev_zt_row: 一板涨停数据行
+    industry_zt_count: 该股所属行业在二板日的涨停股总数
     """
     result = {
         "股票代码": code,
         "股票名称": name,
         "股票价格": zt_row.get("最新价", "N/A"),
+        "行业涨停数": industry_zt_count or "N/A",
         "自由流通盘金额": get_free_float_cap(
             code,
             fallback=float(zt_row.get("流通市值", 0)) if pd.notna(zt_row.get("流通市值")) else None,
@@ -683,6 +699,9 @@ def fetch_all_data(
     for _, row in current_zt.iterrows():
         current_zt_index[str(row["代码"]).zfill(6)] = row
 
+    # 统计二板日各行业的涨停股数量
+    industry_counts = get_industry_limit_up_count(current_zt)
+
     for i, code in enumerate(consecutive_list):
         if progress_callback:
             progress_callback(
@@ -693,6 +712,7 @@ def fetch_all_data(
         zt_row = current_zt_index.get(code)
         prev_zt_row = prev_zt_index.get(code)
         name = zt_row["名称"] if zt_row is not None else code
+        industry = zt_row.get("所属行业", "") if zt_row is not None else ""
 
         try:
             stock_data = enrich_single_stock(
@@ -704,6 +724,7 @@ def fetch_all_data(
                 is_latest=is_latest,
                 zt_row=zt_row if zt_row is not None else {},
                 prev_zt_row=prev_zt_row if prev_zt_row is not None else None,
+                industry_zt_count=industry_counts.get(industry, 0),
             )
             enriched.append(stock_data)
         except Exception as e:

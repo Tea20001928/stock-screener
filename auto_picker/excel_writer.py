@@ -182,6 +182,7 @@ def write_excel(results: list, sanban_date: str, erban_date: str, yiban_date: st
     col_widths = {
         "股票代码": 12,
         "股票名称": 12,
+        "行业涨停数": 10,
         "三板竞价涨幅": 14,
         "三板竞价金额": 16,
         "二板竞价涨幅": 14,

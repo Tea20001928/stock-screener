@@ -15,6 +15,7 @@ OUTPUT_DIR = os.path.join(DESKTOP_PATH, OUTPUT_DIR_NAME)
 COLUMNS = [
     "股票代码",
     "股票名称",
+    "行业涨停数",  # 二板日该行业板块涨停股总数
     "三板竞价涨幅",
     "三板竞价金额",
     "二板竞价涨幅",
