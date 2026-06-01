@@ -8,7 +8,7 @@ import pandas as pd
 import akshare as ak
 import requests
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List
 
 from config import (
     ZT_KEEP_FIELDS,
@@ -527,7 +527,10 @@ def enrich_single_stock(
         "股票代码": code,
         "股票名称": name,
         "股票价格": zt_row.get("最新价", "N/A"),
-        "自由流通盘金额": zt_row.get("流通市值", "N/A"),
+        "自由流通盘金额": get_free_float_cap(
+            code,
+            fallback=float(zt_row.get("流通市值", 0)) if pd.notna(zt_row.get("流通市值")) else None,
+        ) or zt_row.get("流通市值", "N/A"),
         "行业": zt_row.get("所属行业", "N/A"),
         "当天最后涨停时间": _format_limit_up_time(zt_row.get("最后封板时间")),
     }
@@ -711,3 +714,122 @@ def fetch_all_data(
         time.sleep(0.2)
 
     return enriched, current_zt, prev_zt
+
+
+# ============================================================
+# 自由流通市值缓存（push2 API 不稳定，拉取一次全局缓存）
+# ============================================================
+
+_free_float_cache: Dict[str, float] = {}
+_free_float_cache_loaded = False
+
+
+def _build_free_float_cache(max_pages: int = 60) -> int:
+    """
+    从 push2 clist API 分页拉取全 A 股 f21（自由流通市值），存入模块级缓存。
+
+    返回成功拉取的股票数。连接失败则静默跳过（后续使用流通市值回退）。
+    """
+    global _free_float_cache, _free_float_cache_loaded
+
+    import time as _time
+
+    nodes = [
+        "https://push2.eastmoney.com",
+        "https://76.push2.eastmoney.com",
+        "https://57.push2.eastmoney.com",
+    ]
+    node_idx = 0
+    page_size = 100
+
+    for page in range(1, max_pages + 1):
+        node = nodes[node_idx % len(nodes)]
+        url = f"{node}/api/qt/clist/get"
+        params = {
+            "pn": str(page),
+            "pz": str(page_size),
+            "po": "1",
+            "np": "1",
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": "2",
+            "invt": "2",
+            "fid": "f3",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+            "fields": "f12,f21",
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            })
+
+            if resp.status_code != 200:
+                node_idx += 1
+                _time.sleep(2)
+                continue
+
+            data = resp.json()
+            diffs = data.get("data", {}).get("diff", [])
+            if not diffs:
+                break
+
+            for item in diffs:
+                code = str(item.get("f12", "")).zfill(6)
+                f21 = item.get("f21")
+                if f21 and f21 > 0:
+                    _free_float_cache[code] = f21
+
+        except Exception:
+            node_idx += 1
+            _time.sleep(2)
+            continue
+
+        _time.sleep(1.5)
+
+        if len(_free_float_cache) > 5000:
+            break
+
+    _free_float_cache_loaded = True
+    return len(_free_float_cache)
+
+
+def get_free_float_cap(code: str, fallback: float = None) -> float:
+    """
+    获取某只股票的自由流通市值（元）
+
+    优先从 push2 缓存取 f21（真正的自由流通市值），
+    不可用时回退到传入的 fallback（通常是涨停池里的流通市值）。
+
+    code: 6位代码
+    fallback: 流通市值（元），作为回退值
+    """
+    global _free_float_cache_loaded
+
+    if not _free_float_cache_loaded:
+        _build_free_float_cache()
+
+    code = str(code).zfill(6)
+    if code in _free_float_cache:
+        return _free_float_cache[code]
+
+    # 回退：流通市值（次优）
+    if fallback is not None and fallback > 0:
+        return float(fallback)
+
+    return 0.0
+
+
+def is_using_real_free_float() -> bool:
+    """
+    返回当前是否使用了真正的自由流通市值（f21），
+    还是回退到了涨停池的流通市值。
+
+    Excel 表头会据此自动切换：
+      True  → "自由流通盘金额"
+      False → "流通市值"
+    """
+    global _free_float_cache_loaded
+    if not _free_float_cache_loaded:
+        _build_free_float_cache()
+    return len(_free_float_cache) > 0

@@ -17,6 +17,7 @@ from openpyxl.styles import (
 from openpyxl.utils import get_column_letter
 
 from config import OUTPUT_DIR, OUTPUT_DIR_NAME, COLUMNS
+from data_fetcher import is_using_real_free_float
 
 
 def _ensure_output_dir():
@@ -69,11 +70,27 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
     # 创建 DataFrame
     df = pd.DataFrame(stock_list)
 
+    # 自由流通市值 vs 流通市值 回退：自动切换列名
+    cap_label = "自由流通盘金额" if is_using_real_free_float() else "流通市值"
+    col_rename = {}
+    if "自由流通盘金额" in df.columns and cap_label != "自由流通盘金额":
+        col_rename["自由流通盘金额"] = cap_label
+    ratio_old = "二板竞价成交量/自由流通盘金额"
+    ratio_new = f"二板竞价成交量/{cap_label}"
+    if ratio_old in df.columns and ratio_old != ratio_new:
+        col_rename[ratio_old] = ratio_new
+    if col_rename:
+        df.rename(columns=col_rename, inplace=True)
+
+    # 构建实际显示列 + 反向映射
+    display_columns = [col_rename.get(col, col) for col in COLUMNS]
+    col_lookup = {v: k for k, v in col_rename.items()}  # display name → internal key
+
     # 确保列顺序
-    for col in COLUMNS:
+    for col in display_columns:
         if col not in df.columns:
             df[col] = "N/A"
-    df = df[COLUMNS]
+    df = df[display_columns]
 
     # ---- 使用 openpyxl 写入格式化 Excel ----
     wb = Workbook()
@@ -101,7 +118,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
     ratio_cols = {
         "二板竞价涨幅",
         "一板竞价涨幅",
-        "二板竞价成交量/自由流通盘金额",
+        ratio_new,  # 依赖列名跟着 cap_label 变
         "二板/一板交易量",
         "二板/一板竞价成交量",
         "二板/一板竞价涨幅",
@@ -109,7 +126,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
 
     # 金额列
     amount_cols = {
-        "自由流通盘金额",
+        cap_label,  # 表头跟着数据源切换
         "二板竞价成交量",
         "二板交易量",
         "一板竞价成交量",
@@ -118,7 +135,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
 
     # === 写入标题行 ===
     title = f"连板股复盘报告 — {prev_date}（一板）→ {current_date}（二板）"
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(COLUMNS))
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(display_columns))
     title_cell = ws.cell(row=1, column=1, value=title)
     title_cell.font = Font(name="微软雅黑", size=14, bold=True, color="1F4E79")
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -126,7 +143,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
 
     # 副标题
     subtitle = f"共筛选出 {len(stock_list)} 只连板股 | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(COLUMNS))
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(display_columns))
     sub_cell = ws.cell(row=2, column=1, value=subtitle)
     sub_cell.font = Font(name="微软雅黑", size=9, color="808080")
     sub_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -134,7 +151,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
 
     # === 写入表头（第3行）===
     header_row = 3
-    for col_idx, col_name in enumerate(COLUMNS, start=1):
+    for col_idx, col_name in enumerate(display_columns, start=1):
         cell = ws.cell(row=header_row, column=col_idx, value=col_name)
         cell.font = header_font
         cell.fill = header_fill
@@ -153,8 +170,9 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
         else:
             row_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
 
-        for col_idx, col_name in enumerate(COLUMNS, start=1):
-            value = stock.get(col_name, "N/A")
+        for col_idx, col_name in enumerate(display_columns, start=1):
+            lookup_key = col_lookup.get(col_name, col_name)
+            value = stock.get(lookup_key, "N/A")
             cell = ws.cell(row=excel_row, column=col_idx, value=value)
             cell.font = data_font
             cell.border = thin_border
@@ -194,6 +212,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
         "股票名称": 12,
         "股票价格": 10,
         "自由流通盘金额": 16,
+        "流通市值": 16,
         "行业": 12,
         "当天最后涨停时间": 16,
         "二板竞价涨幅": 14,
@@ -203,6 +222,7 @@ def write_excel(stock_list: list, current_date: str, prev_date: str) -> str:
         "一板竞价成交量": 16,
         "一板交易量": 16,
         "二板竞价成交量/自由流通盘金额": 22,
+        "二板竞价成交量/流通市值": 22,
         "二板/一板交易量": 16,
         "二板/一板竞价成交量": 18,
         "二板/一板竞价涨幅": 16,

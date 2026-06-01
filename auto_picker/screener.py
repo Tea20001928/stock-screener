@@ -25,7 +25,6 @@ from auto_picker.data_fetcher import (
     get_spot_for_codes_sina,
     get_today_auction_volume,
     get_auction_price_change,
-    get_stock_free_float_cap,
 )
 from auto_picker.config import (
     COLUMNS,
@@ -219,9 +218,11 @@ def screen_auto_pick(
         erban_auction_vol = _get_auction_amount_for_date(code, erban_date)
 
         # ---- 基础字段 ----
-        free_float_cap = (
+        from data_fetcher import get_free_float_cap
+        fallback_float = (
             float(er_row["流通市值"]) if er_row is not None and pd.notna(er_row.get("流通市值")) else 0
         )
+        free_float_cap = get_free_float_cap(code, fallback=fallback_float) if fallback_float > 0 else 0
         last_zt_time = er_row.get("最后封板时间", "N/A") if er_row is not None else "N/A"
         industry = er_row.get("所属行业", "N/A") if er_row is not None else "N/A"
 
